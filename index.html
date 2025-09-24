@@ -95,9 +95,10 @@
       };
       // =========================================================================
 
-      let docId = null;
-      let token = null;
-      const host = window.location.origin; // hôte grist (quand embarqué comme widget)
+      const tok = await grist.docApi.getAccessToken();
+      docId  = tok.docId;
+      token  = tok.token;
+      apiBase = tok.baseUrl || 'https://grist.la.zone/';  // ✅ base Grist
 
       const els = {
         searchForm: document.getElementById('searchForm'),
@@ -129,7 +130,8 @@
       async function api(path, opts={}) {
         const headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
         if (token) headers['Authorization'] = `Bearer ${token}`;
-        const res = await fetch(`${host}${path}`, {...opts, headers});
+        if (!apiBase) throw new Error('API non initialisée (apiBase manquant).');
+        const res = await fetch(`${apiBase}${path}`, {...opts, headers});
         if (!res.ok) {
           const t = await res.text();
           throw new Error(`${res.status} ${res.statusText}\n${t}`);
@@ -146,7 +148,6 @@
         const path = `/api/docs/${docId}/tables/${TABLE_ID}/records/query`;
         const out = await api(path, { method: 'POST', body: JSON.stringify(body) });
         const rec = (out.records && out.records[0]) ? out.records[0] : null;
-        // Retourne {id, fields:{...}} ou null
         return rec;
       }
 
@@ -176,6 +177,7 @@
             const tok = await grist.docApi.getAccessToken();
             docId = tok.docId;
             token = tok.token;
+            apiBase = tok.baseUrl || 'https://docs.getgrist.com';
           } catch (err) {
             note('Impossible d’obtenir un jeton Grist. Es-tu dans un widget custom avec accès "Full"?\n' + err.message, 'err');
           }
@@ -237,9 +239,6 @@
         try {
           await upsertContact(payload);
           note('✔️ Enregistré.', 'ok');
-          // Optionnel: reset des champs prénom/nom uniquement
-          // els.first.value = '';
-          // els.last.value = '';
         } catch (err) {
           note('Erreur pendant l’enregistrement :\n' + err.message, 'err');
         } finally {

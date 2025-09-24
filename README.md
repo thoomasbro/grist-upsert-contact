@@ -24,40 +24,23 @@ Widget custom (GitHub Pages-ready) pour écrire dans une table `contact` :
 
 3. **Widget Custom**
    - Ajoute un widget **Custom** sur une page.
-   - URL : celle publiée par GitHub Pages (ex: `https://<ton-user>.github.io/grist-upsert-form/`).
+   - URL : celle publiée par GitHub Pages.
    - **Access level** : *Full document access*.
    - Teste en navigation privée.
 
 ## Déploiement GitHub Pages
 
-1. Crée un dépôt (ex: `grist-upsert-form`) et pousse `index.html` et `README.md`.
+1. Crée un dépôt et pousse `index.html` et `README.md`.
 2. Active **Pages** (branche `main`, répertoire `/`).
-3. Attends que la page soit en ligne puis utilise cette URL dans le widget.
-
-## Personnalisation
-
-- Dans `index.html`, modifie :
-  ```js
-  const TABLE_ID = 'contact';
-  const COLS = { first: 'first_name', last: 'last_name', company: 'company' };
-  ```
-- Pour contraindre l’unicité `company`, tu peux ajouter une règle dans Grist ou gérer côté process.
+3. Utilise l’URL fournie par GitHub Pages dans ton widget.
 
 ## Notes techniques
 
 - Recherche : `POST /records/query` avec `filters: {company: [<val>]}`, `limit: 1`
-- Enregistrement : `PUT /records` avec
-  ```json
-  {
-    "records": [{
-      "require": {"company": "<val>"},
-      "fields":  {"first_name": "...", "last_name": "...", "company": "..."}
-    }],
-    "add": true, "update": true, "onMany": "first"
-  }
+- Enregistrement : `PUT /records` en upsert
+- Auth : jeton + **baseUrl** via `grist.docApi.getAccessToken()` (utilisé pour tous les fetch), ex.:
+  ```js
+  const tok = await grist.docApi.getAccessToken();
+  apiBase = tok.baseUrl || 'https://docs.getgrist.com';
+  const res = await fetch(`${apiBase}/api/docs/${tok.docId}/...`, { headers: { Authorization: 'Bearer ' + tok.token } });
   ```
-- Auth : jeton **scellé au document** via `grist.docApi.getAccessToken()` (aucune API key perso exposée).
-
----
-
-Bon usage !
