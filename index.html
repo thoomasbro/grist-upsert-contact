@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Grist — Formulaire Contact (Upsert par entreprise)</title>
+    <title>Grist — Contact (Upsert par entreprise)</title>
     <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
     <style>
       :root { --gap: 14px; --radius: 12px; --font: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, sans-serif; }
       html, body { height: 100%; }
       body { margin: 0; font-family: var(--font); background: #0b0f14; color: #e6edf3; }
-      .wrap { max-width: 560px; margin: 0 auto; padding: 24px; }
+      .wrap { max-width: 620px; margin: 0 auto; padding: 24px; }
       .card { background: #111827; border: 1px solid #1f2937; border-radius: var(--radius); padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
       h1 { font-size: 1.2rem; margin: 0 0 6px; }
       p.desc { margin: 0 0 14px; color: #9fb0c0; font-size: .95rem; }
@@ -28,16 +28,20 @@
       .err { color: #f87171; white-space: pre-wrap; }
       .hidden { display: none !important; }
       .sep { height: 1px; background: #1f2937; margin: 14px 0; }
-      .foot { margin-top: 10px; }
-      a { color: #8ab4ff; }
-      .badge { display:inline-block; padding: 2px 8px; border:1px solid #2b3a4c; border-radius:999px; font-size:.8rem; color:#9fb0c0;}
+      .badge { display:inline-block; padding: 2px 8px; border:1px solid #2b3a4c; border-radius:999px; font-size:.8rem; color:#9fb0c0; }
+      code.kv { background:#0f172a; padding:2px 6px; border-radius:6px; border:1px solid #293548; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <div class="card">
         <h1>Contact — ajout / mise à jour</h1>
-        <p class="desc">1) Renseigne l'entreprise puis valide. 2) Si elle existe, le formulaire sera pré-rempli pour mise à jour. Sinon, un nouveau contact sera créé.</p>
+        <p class="desc">1) Renseigne l'entreprise puis clique <strong>Vérifier</strong>.<br>2) Si elle existe, le formulaire est pré-rempli. Sinon, un contact sera créé.</p>
+
+        <details class="muted" id="diag" open>
+          <summary>Diagnostic</summary>
+          <div id="diagBody" class="muted"></div>
+        </details>
 
         <!-- Étape 1 : recherche par entreprise -->
         <form id="searchForm" autocomplete="off">
@@ -80,27 +84,21 @@
 
           <div id="msg" class="msg"></div>
         </form>
-
-        <div class="foot muted">Ce widget utilise <code>PUT /records</code> en mode upsert avec <code>require: {"company": ...}</code>.</div>
       </div>
     </div>
 
     <script type="module">
-      // === Configuration minimale (adapte les IDs à ton doc) ==================
-      const TABLE_ID = 'contact';          // tableId dans Grist (ex: 'contact')
-      const COLS = {                        // colIds exacts de la table
-        first: 'first_name',
-        last:  'last_name',
-        company: 'company'
-      };
+      // === Configuration minimale =============================================
+      const TABLE_ID = 'contact';
+      const COLS = { first: 'first_name', last: 'last_name', company: 'company' };
       // =========================================================================
 
-      const tok = await grist.docApi.getAccessToken();
-      docId  = tok.docId;
-      token  = tok.token;
-      apiBase = tok.baseUrl || 'https://grist.la.zone/';  // ✅ base Grist
+      let docId = null;
+      let token = null;
+      let apiBase = null;
 
       const els = {
+        diagBody: document.getElementById('diagBody'),
         searchForm: document.getElementById('searchForm'),
         companySearch: document.getElementById('companySearch'),
         btnCheck: document.getElementById('btnCheck'),
@@ -116,76 +114,93 @@
         msg: document.getElementById('msg'),
       };
 
-      function setBusy(node, busy) {
-        if (busy) { node.setAttribute('disabled', ''); }
-        else { node.removeAttribute('disabled'); }
+      const urlParams = new URLSearchParams(location.search);
+      const apiBaseOverride = (urlParams.get('apiBase') || '').replace(/\/+$/, '');
+
+      function logDiag(lines) {
+        const arr = Array.isArray(lines) ? lines : [lines];
+        for (const l of arr) {
+          const p = document.createElement('div');
+          p.innerHTML = l;
+          els.diagBody.appendChild(p);
+        }
       }
+
+      logDiag([
+        '<div>Mode: <code class="kv">module</code></div>',
+        apiBaseOverride ? `<div>apiBase override: <code class="kv">${apiBaseOverride}</code></div>` : '<div>apiBase override: <code class="kv">none</code></div>'
+      ]);
+
+      function setBusy(node, busy) { busy ? node.setAttribute('disabled','') : node.removeAttribute('disabled'); }
       function show(node) { node.classList.remove('hidden'); }
       function hide(node) { node.classList.add('hidden'); }
-      function note(text, cls='') {
-        els.msg.textContent = text || '';
-        els.msg.className = 'msg ' + (cls || '');
-      }
+      function note(text, cls='') { els.msg.textContent = text || ''; els.msg.className = 'msg ' + (cls || ''); }
 
-      async function api(path, opts={}) {
+      function api(path, opts={}) {
         const headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
         if (token) headers['Authorization'] = `Bearer ${token}`;
-        if (!apiBase) throw new Error('API non initialisée (apiBase manquant).');
-        const res = await fetch(`${apiBase}${path}`, {...opts, headers});
-        if (!res.ok) {
-          const t = await res.text();
-          throw new Error(`${res.status} ${res.statusText}\n${t}`);
-        }
-        return res.json();
-      }
-
-      // Recherche par company (1er match)
-      async function findByCompany(company) {
-        const body = {
-          filters: { [COLS.company]: [company] },
-          limit: 1
-        };
-        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records/query`;
-        const out = await api(path, { method: 'POST', body: JSON.stringify(body) });
-        const rec = (out.records && out.records[0]) ? out.records[0] : null;
-        return rec;
-      }
-
-      async function upsertContact({first, last, company}) {
-        const body = {
-          records: [{
-            require: { [COLS.company]: company },
-            fields:  {
-              [COLS.first]: first,
-              [COLS.last]:  last,
-              [COLS.company]: company,
-            }
-          }],
-          add: true,
-          update: true,
-          onMany: 'first'
-        };
-        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records`;
-        return await api(path, { method: 'PUT', body: JSON.stringify(body) });
-      }
-
-      // Initialisation Grist (token scellé au doc)
-      function init() {
-        grist.ready({ requiredAccess: 'full' });
-        grist.onOptions(async () => {
-          try {
-            const tok = await grist.docApi.getAccessToken();
-            docId = tok.docId;
-            token = tok.token;
-            apiBase = tok.baseUrl || 'https://docs.getgrist.com';
-          } catch (err) {
-            note('Impossible d’obtenir un jeton Grist. Es-tu dans un widget custom avec accès "Full"?\n' + err.message, 'err');
+        const base = apiBase || apiBaseOverride;
+        if (!base) return Promise.reject(new Error('API non initialisée : pas de base URL (token non obtenu ? access level Full ?)'));
+        return fetch(`${base}${path}`, {...opts, headers}).then(async res => {
+          if (!res.ok) {
+            const body = await res.text();
+            throw new Error(`${res.status} ${res.statusText}\n${body}`);
           }
+          return res.json();
         });
       }
 
-      // UX logique
-      els.searchForm.addEventListener('submit', async (e) => {
+      function findByCompany(company) {
+        const body = { filters: { [COLS.company]: [company] }, limit: 1 };
+        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records/query`;
+        return api(path, { method: 'POST', body: JSON.stringify(body) })
+          .then(out => (out.records && out.records[0]) ? out.records[0] : null);
+      }
+
+      function upsertContact({first, last, company}) {
+        const body = {
+          records: [{
+            require: { [COLS.company]: company },
+            fields:  { [COLS.first]: first, [COLS.last]: last, [COLS.company]: company }
+          }],
+          add: true, update: true, onMany: 'first'
+        };
+        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records`;
+        return api(path, { method: 'PUT', body: JSON.stringify(body) });
+      }
+
+      function init() {
+        grist.ready({ requiredAccess: 'full' });
+
+        // 1) Tente de prendre le token immédiatement (sans onOptions)
+        grist.docApi.getAccessToken()
+          .then(tok => {
+            docId  = tok.docId;
+            token  = tok.token;
+            apiBase = tok.baseUrl || 'https://docs.getgrist.com';
+            logDiag([
+              `<div>docId: <code class="kv">${docId}</code></div>`,
+              `<div>apiBase (token): <code class="kv">${apiBase}</code></div>`
+            ]);
+          })
+          .catch(err => {
+            logDiag(`<div class="err">Erreur getAccessToken(): ${err.message}</div>`);
+          });
+
+        // 2) En plus, si des options sont changées, on refait le token
+        grist.onOptions(() => {
+          grist.docApi.getAccessToken()
+            .then(tok => {
+              docId  = tok.docId;
+              token  = tok.token;
+              apiBase = tok.baseUrl || 'https://docs.getgrist.com';
+              logDiag(`<div>onOptions → token rafraîchi</div>`);
+            })
+            .catch(err => logDiag(`<div class="err">onOptions getAccessToken(): ${err.message}</div>`));
+        });
+      }
+
+      els.searchForm.addEventListener('submit', (e) => {
         e.preventDefault();
         const company = els.companySearch.value.trim();
         if (!company) return;
@@ -193,25 +208,27 @@
         els.searchInfo.textContent = 'Recherche…';
         note('');
 
-        try {
-          const rec = await findByCompany(company);
-          show(els.editForm);
-          els.company.value = company;
-          if (rec) {
-            els.first.value = rec.fields[COLS.first] ?? '';
-            els.last.value  = rec.fields[COLS.last]  ?? '';
-            els.editInfo.textContent = 'Entreprise trouvée — modification possible.';
-          } else {
-            els.first.value = '';
-            els.last.value  = '';
-            els.editInfo.textContent = 'Nouvelle entreprise — un contact sera créé.';
-          }
-        } catch (err) {
-          note('Erreur pendant la recherche :\n' + err.message, 'err');
-        } finally {
-          setBusy(els.btnCheck, false);
-          els.searchInfo.textContent = '';
-        }
+        findByCompany(company)
+          .then(rec => {
+            show(els.editForm);
+            els.company.value = company;
+            if (rec) {
+              els.first.value = rec.fields[COLS.first] ?? '';
+              els.last.value  = rec.fields[COLS.last]  ?? '';
+              els.editInfo.textContent = 'Entreprise trouvée — modification possible.';
+            } else {
+              els.first.value = '';
+              els.last.value  = '';
+              els.editInfo.textContent = 'Nouvelle entreprise — un contact sera créé.';
+            }
+          })
+          .catch(err => {
+            note('Erreur recherche :\n' + err.message, 'err');
+          })
+          .finally(() => {
+            setBusy(els.btnCheck, false);
+            els.searchInfo.textContent = '';
+          });
       });
 
       els.changeCompany.addEventListener('click', () => {
@@ -220,7 +237,7 @@
         note('');
       });
 
-      els.editForm.addEventListener('submit', async (e) => {
+      els.editForm.addEventListener('submit', (e) => {
         e.preventDefault();
         const payload = {
           first: els.first.value.trim(),
@@ -236,18 +253,15 @@
         els.editInfo.textContent = 'Enregistrement…';
         note('');
 
-        try {
-          await upsertContact(payload);
-          note('✔️ Enregistré.', 'ok');
-        } catch (err) {
-          note('Erreur pendant l’enregistrement :\n' + err.message, 'err');
-        } finally {
-          setBusy(els.btnSave, false);
-          els.editInfo.textContent = '';
-        }
+        upsertContact(payload)
+          .then(() => note('✔️ Enregistré.', 'ok'))
+          .catch(err => note('Erreur enregistrement :\n' + err.message, 'err'))
+          .finally(() => {
+            setBusy(els.btnSave, false);
+            els.editInfo.textContent = '';
+          });
       });
 
-      // Démarre
       init();
     </script>
   </body>
