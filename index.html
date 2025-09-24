@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grist — Formulaire Contact (Upsert par entreprise)</title>
+    <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+    <style>
+      :root { --gap: 14px; --radius: 12px; --font: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, sans-serif; }
+      html, body { height: 100%; }
+      body { margin: 0; font-family: var(--font); background: #0b0f14; color: #e6edf3; }
+      .wrap { max-width: 560px; margin: 0 auto; padding: 24px; }
+      .card { background: #111827; border: 1px solid #1f2937; border-radius: var(--radius); padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+      h1 { font-size: 1.2rem; margin: 0 0 6px; }
+      p.desc { margin: 0 0 14px; color: #9fb0c0; font-size: .95rem; }
+      form { display: grid; gap: var(--gap); }
+      .row { display: grid; gap: 8px; }
+      label { font-size: .9rem; color: #b9c7d6; }
+      input[type="text"] { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid #293548; background: #0f172a; color: #e6edf3; }
+      input[readonly] { opacity: .85; }
+      .actions { display: flex; gap: 10px; align-items: center; }
+      button { border: 0; border-radius: 10px; padding: 10px 14px; background: #2563eb; color: white; cursor: pointer; }
+      button.secondary { background: #334155; }
+      button:disabled { opacity: .6; cursor: wait; }
+      .muted { color: #9fb0c0; font-size: .9rem; }
+      .msg { margin-top: 12px; font-size: .95rem; }
+      .ok { color: #22c55e; }
+      .err { color: #f87171; white-space: pre-wrap; }
+      .hidden { display: none !important; }
+      .sep { height: 1px; background: #1f2937; margin: 14px 0; }
+      .foot { margin-top: 10px; }
+      a { color: #8ab4ff; }
+      .badge { display:inline-block; padding: 2px 8px; border:1px solid #2b3a4c; border-radius:999px; font-size:.8rem; color:#9fb0c0;}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Contact — ajout / mise à jour</h1>
+        <p class="desc">1) Renseigne l'entreprise puis valide. 2) Si elle existe, le formulaire sera pré-rempli pour mise à jour. Sinon, un nouveau contact sera créé.</p>
+
+        <!-- Étape 1 : recherche par entreprise -->
+        <form id="searchForm" autocomplete="off">
+          <div class="row">
+            <label for="companySearch">Entreprise</label>
+            <input id="companySearch" name="company" type="text" placeholder="Nom de l’entreprise" required>
+          </div>
+          <div class="actions">
+            <button id="btnCheck" type="submit">Vérifier</button>
+            <span id="searchInfo" class="muted"></span>
+          </div>
+        </form>
+
+        <div class="sep"></div>
+
+        <!-- Étape 2 : édition / création -->
+        <form id="editForm" class="hidden" autocomplete="off">
+          <div class="row">
+            <label for="company">Entreprise <span class="badge">clé de déduplication</span></label>
+            <input id="company" name="company" type="text" readonly required>
+            <div class="actions">
+              <button type="button" class="secondary" id="changeCompany">Changer d’entreprise</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <label for="first_name">Prénom</label>
+            <input id="first_name" name="first_name" type="text" placeholder="Prénom" required>
+          </div>
+
+          <div class="row">
+            <label for="last_name">Nom</label>
+            <input id="last_name" name="last_name" type="text" placeholder="Nom" required>
+          </div>
+
+          <div class="actions">
+            <button id="btnSave" type="submit">Enregistrer</button>
+            <span id="editInfo" class="muted"></span>
+          </div>
+
+          <div id="msg" class="msg"></div>
+        </form>
+
+        <div class="foot muted">Ce widget utilise <code>PUT /records</code> en mode upsert avec <code>require: {"company": ...}</code>.</div>
+      </div>
+    </div>
+
+    <script>
+      // === Configuration minimale (adapte les IDs à ton doc) ==================
+      const TABLE_ID = 'contact';          // tableId dans Grist (ex: 'contact')
+      const COLS = {                        // colIds exacts de la table
+        first: 'first_name',
+        last:  'last_name',
+        company: 'company'
+      };
+      // =========================================================================
+
+      let docId = null;
+      let token = null;
+      const host = window.location.origin; // hôte grist (quand embarqué comme widget)
+
+      const els = {
+        searchForm: document.getElementById('searchForm'),
+        companySearch: document.getElementById('companySearch'),
+        btnCheck: document.getElementById('btnCheck'),
+        searchInfo: document.getElementById('searchInfo'),
+
+        editForm: document.getElementById('editForm'),
+        changeCompany: document.getElementById('changeCompany'),
+        company: document.getElementById('company'),
+        first: document.getElementById('first_name'),
+        last: document.getElementById('last_name'),
+        btnSave: document.getElementById('btnSave'),
+        editInfo: document.getElementById('editInfo'),
+        msg: document.getElementById('msg'),
+      };
+
+      function setBusy(node, busy) {
+        if (busy) { node.setAttribute('disabled', ''); }
+        else { node.removeAttribute('disabled'); }
+      }
+      function show(node) { node.classList.remove('hidden'); }
+      function hide(node) { node.classList.add('hidden'); }
+      function note(text, cls='') {
+        els.msg.textContent = text || '';
+        els.msg.className = 'msg ' + (cls || '');
+      }
+
+      async function api(path, opts={}) {
+        const headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(`${host}${path}`, {...opts, headers});
+        if (!res.ok) {
+          const t = await res.text();
+          throw new Error(`${res.status} ${res.statusText}\n${t}`);
+        }
+        return res.json();
+      }
+
+      // Recherche par company (1er match)
+      async function findByCompany(company) {
+        const body = {
+          filters: { [COLS.company]: [company] },
+          limit: 1
+        };
+        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records/query`;
+        const out = await api(path, { method: 'POST', body: JSON.stringify(body) });
+        const rec = (out.records && out.records[0]) ? out.records[0] : null;
+        // Retourne {id, fields:{...}} ou null
+        return rec;
+      }
+
+      async function upsertContact({first, last, company}) {
+        const body = {
+          records: [{
+            require: { [COLS.company]: company },
+            fields:  {
+              [COLS.first]: first,
+              [COLS.last]:  last,
+              [COLS.company]: company,
+            }
+          }],
+          add: true,
+          update: true,
+          onMany: 'first'
+        };
+        const path = `/api/docs/${docId}/tables/${TABLE_ID}/records`;
+        return await api(path, { method: 'PUT', body: JSON.stringify(body) });
+      }
+
+      // Initialisation Grist (token scellé au doc)
+      function init() {
+        grist.ready({ requiredAccess: 'full' });
+        grist.onOptions(async () => {
+          try {
+            const tok = await grist.docApi.getAccessToken();
+            docId = tok.docId;
+            token = tok.token;
+          } catch (err) {
+            note('Impossible d’obtenir un jeton Grist. Es-tu dans un widget custom avec accès "Full"?\n' + err.message, 'err');
+          }
+        });
+      }
+
+      // UX logique
+      els.searchForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const company = els.companySearch.value.trim();
+        if (!company) return;
+        setBusy(els.btnCheck, true);
+        els.searchInfo.textContent = 'Recherche…';
+        note('');
+
+        try {
+          const rec = await findByCompany(company);
+          show(els.editForm);
+          els.company.value = company;
+          if (rec) {
+            els.first.value = rec.fields[COLS.first] ?? '';
+            els.last.value  = rec.fields[COLS.last]  ?? '';
+            els.editInfo.textContent = 'Entreprise trouvée — modification possible.';
+          } else {
+            els.first.value = '';
+            els.last.value  = '';
+            els.editInfo.textContent = 'Nouvelle entreprise — un contact sera créé.';
+          }
+        } catch (err) {
+          note('Erreur pendant la recherche :\n' + err.message, 'err');
+        } finally {
+          setBusy(els.btnCheck, false);
+          els.searchInfo.textContent = '';
+        }
+      });
+
+      els.changeCompany.addEventListener('click', () => {
+        hide(els.editForm);
+        els.companySearch.focus();
+        note('');
+      });
+
+      els.editForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+          first: els.first.value.trim(),
+          last:  els.last.value.trim(),
+          company: els.company.value.trim(),
+        };
+        if (!payload.first || !payload.last || !payload.company) {
+          note('Merci de renseigner tous les champs.', 'err');
+          return;
+        }
+
+        setBusy(els.btnSave, true);
+        els.editInfo.textContent = 'Enregistrement…';
+        note('');
+
+        try {
+          await upsertContact(payload);
+          note('✔️ Enregistré.', 'ok');
+          // Optionnel: reset des champs prénom/nom uniquement
+          // els.first.value = '';
+          // els.last.value = '';
+        } catch (err) {
+          note('Erreur pendant l’enregistrement :\n' + err.message, 'err');
+        } finally {
+          setBusy(els.btnSave, false);
+          els.editInfo.textContent = '';
+        }
+      });
+
+      // Démarre
+      init();
+    </script>
+  </body>
+</html>
